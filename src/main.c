@@ -50,10 +50,8 @@ static const struct device *uart = DEVICE_DT_GET(DT_CHOSEN(nordic_nus_uart));
 static struct k_work_delayable uart_work;
 static struct k_work scan_work;
 
-/* --- BLINKING VARIABLES --- */
 static struct k_work_delayable blink_work;
 static volatile bool is_blinking = false;
-/* -------------------------- */
 
 K_SEM_DEFINE(nus_write_sem, 0, 1);
 
@@ -69,11 +67,9 @@ static K_FIFO_DEFINE(fifo_uart_rx_data);
 static struct bt_conn *default_conn;
 static struct bt_nus_client nus_client;
 
-/* --- BLINK HANDLER --- */
 static void blink_handler(struct k_work *work)
 {
     if (!is_blinking) {
-        /* If flag was cleared, ensure LEDs are off and stop scheduling */
         dk_set_leds_state(DK_ALL_LEDS_MSK, DK_NO_LEDS_MSK);
         return;
     }
@@ -81,16 +77,9 @@ static void blink_handler(struct k_work *work)
     static bool toggle_state = false;
     toggle_state = !toggle_state;
 
-    if (toggle_state) {
-        dk_set_leds_state(DK_ALL_LEDS_MSK, DK_ALL_LEDS_MSK); /* All ON */
-    } else {
-        dk_set_leds_state(DK_ALL_LEDS_MSK, DK_NO_LEDS_MSK); /* All OFF */
-    }
-
-    /* Reschedule self for 500ms later */
-    k_work_schedule(&blink_work, K_MSEC(500));
+    dk_set_leds_state(!toggle_state ? DK_ALL_LEDS_MSK : DK_NO_LEDS_MSK, toggle_state ? DK_ALL_LEDS_MSK : DK_NO_LEDS_MSK);
+    k_work_reschedule(&blink_work, K_MSEC(500));
 }
-/* --------------------- */
 
 static void ble_data_sent(struct bt_nus_client *nus, uint8_t err,
                     const uint8_t *const data, uint16_t len)
@@ -111,14 +100,13 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
 {
     ARG_UNUSED(nus);
 
-    /* --- LED LOGIC START --- */
-    printk("Received: %.*s\n", len, (char *)data);
+    printk("Received: %.*s\r\n", len, (char *)data);
 
     if (len > 0) {
         char cmd = data[0];
 
         /* If we receive anything other than '2', stop blinking first */
-       if (cmd != '2' && cmd != '\r' && cmd != '\n') {
+        if (cmd != '2') {
             is_blinking = false;
             k_work_cancel_delayable(&blink_work);
         }
@@ -143,9 +131,10 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
             case '2':
                 /* For '2', we START blinking if not already */
                 if (!is_blinking) {
-                    LOG_INF("Processed '2': BLINKING ALL");
+                    printk("Processed '2': BLINKING ALL\n");
                     is_blinking = true;
                     k_work_schedule(&blink_work, K_NO_WAIT);
+
                 }
                 break;
             case '3':
@@ -158,44 +147,6 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
                 break;
             default:
                 break;
-        }
-    }
-    /* --- LED LOGIC END --- */
-
-    int err;
-
-    for (uint16_t pos = 0; pos != len;) {
-        struct uart_data_t *tx = k_malloc(sizeof(*tx));
-
-        if (!tx) {
-            LOG_WRN("Not able to allocate UART send data buffer");
-            return BT_GATT_ITER_CONTINUE;
-        }
-
-        /* Keep the last byte of TX buffer for potential LF char. */
-        size_t tx_data_size = sizeof(tx->data) - 1;
-
-        if ((len - pos) > tx_data_size) {
-            tx->len = tx_data_size;
-        } else {
-            tx->len = (len - pos);
-        }
-
-        memcpy(tx->data, &data[pos], tx->len);
-
-        pos += tx->len;
-
-        /* Append the LF character when the CR character triggered
-         * transmission from the peer.
-         */
-        if ((pos == len) && (data[len - 1] == '\r')) {
-            tx->data[tx->len] = '\n';
-            tx->len++;
-        }
-
-        err = uart_tx(uart, tx->data, tx->len, SYS_FOREVER_MS);
-        if (err) {
-            k_fifo_put(&fifo_uart_tx_data, tx);
         }
     }
 
@@ -707,15 +658,11 @@ int main(void)
         settings_load();
     }
 
-    /* --- ADDED LED INIT --- */
     err = dk_leds_init();
     if (err) {
         LOG_ERR("Could not initialize LEDs (err %d)", err);
     }
-    
-    /* Initialize the blink work item */
     k_work_init_delayable(&blink_work, blink_handler);
-    /* ---------------------- */
 
     err = uart_init();
     if (err != 0) {
@@ -735,7 +682,7 @@ int main(void)
         return 0;
     }
 
-    printk("Starting Bluetooth Central UART sample\n");
+    printk("Starting Bluetooth Central\n");
 
     struct uart_data_t nus_data = {
         .len = 0,
