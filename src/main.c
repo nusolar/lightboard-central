@@ -15,6 +15,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 
+#include <zephyr/drivers/gpio.h>
+
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
@@ -50,9 +52,6 @@ static const struct device *uart = DEVICE_DT_GET(DT_CHOSEN(nordic_nus_uart));
 static struct k_work_delayable uart_work;
 static struct k_work scan_work;
 
-static struct k_work_delayable blink_work;
-static volatile bool is_blinking = false;
-
 K_SEM_DEFINE(nus_write_sem, 0, 1);
 
 struct uart_data_t {
@@ -67,18 +66,64 @@ static K_FIFO_DEFINE(fifo_uart_rx_data);
 static struct bt_conn *default_conn;
 static struct bt_nus_client nus_client;
 
-static void blink_handler(struct k_work *work)
+enum blink_state_t {
+    BLINK_NONE,
+    BLINK_LEFT,
+    BLINK_RIGHT,
+    BLINK_HAZARD
+};
+
+static volatile enum blink_state_t current_blink = BLINK_NONE;
+static struct k_work_delayable blink_work;
+
+static bool headlight_on = false;
+static bool horn_on = false;
+
+static void update_leds(bool blink_toggle_state) 
 {
-    if (!is_blinking) {
-        dk_set_leds_state(DK_ALL_LEDS_MSK, DK_NO_LEDS_MSK);
-        return;
+    uint32_t led_states = 0;
+
+    if (headlight_on) {
+        led_states |= (DK_LED1_MSK | DK_LED2_MSK); 
+    }
+    if (horn_on) {
+        led_states |= (DK_LED3_MSK | DK_LED4_MSK);
     }
 
+    uint32_t blink_pins = 0;
+    if (current_blink == BLINK_LEFT) {
+        blink_pins = (DK_LED1_MSK | DK_LED3_MSK);
+    } else if (current_blink == BLINK_RIGHT) {
+        blink_pins = (DK_LED2_MSK | DK_LED4_MSK);
+    } else if (current_blink == BLINK_HAZARD) {
+        blink_pins = DK_ALL_LEDS_MSK;
+    }
+
+    if (current_blink != BLINK_NONE) {
+        if (blink_toggle_state) {
+            led_states |= blink_pins;
+        } else {
+            led_states &= ~blink_pins;
+        }
+    }
+
+    dk_set_leds(led_states);
+
+}
+
+static void blink_handler(struct k_work *work)
+{
     static bool toggle_state = false;
     toggle_state = !toggle_state;
 
-    dk_set_leds_state(!toggle_state ? DK_ALL_LEDS_MSK : DK_NO_LEDS_MSK, toggle_state ? DK_ALL_LEDS_MSK : DK_NO_LEDS_MSK);
-    k_work_reschedule(&blink_work, K_MSEC(500));
+    // update_car_outputs(toggle_state)
+    update_leds(toggle_state);
+
+    if (current_blink != BLINK_NONE) {
+        k_work_reschedule(&blink_work, K_MSEC(500));
+    } else {
+        update_leds(false);
+    }
 }
 
 static void ble_data_sent(struct bt_nus_client *nus, uint8_t err,
@@ -100,54 +145,52 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
 {
     ARG_UNUSED(nus);
 
-    printk("Received: %.*s\r\n", len, (char *)data);
+    if (len == 0) {
+        return BT_GATT_ITER_CONTINUE;
+    }
+    char cmd = data[0];
 
-    if (len > 0) {
-        char cmd = data[0];
+    if (cmd == '\r' || cmd == '\n') {
+        return BT_GATT_ITER_CONTINUE;
+    }
 
-        /* If we receive anything other than '2', stop blinking first */
-        if (cmd != '2') {
-            is_blinking = false;
-            k_work_cancel_delayable(&blink_work);
-        }
+    printk("Car Command Received: %c\n", cmd);
 
-        switch (cmd) {
-            case '0':
-                /* Turn on LED 1 (User LED0) & LED 3, others off */
-                dk_set_led_on(DK_LED1);
-                dk_set_led_off(DK_LED2);
-                dk_set_led_on(DK_LED3);
-                dk_set_led_off(DK_LED4);
-                LOG_INF("Received '0': LED 1 & 3 ON");
-                break;
-            case '1':
-                /* Turn on LED 2 (User LED1) & LED 4, others off */
-                dk_set_led_off(DK_LED1);
-                dk_set_led_on(DK_LED2);
-                dk_set_led_off(DK_LED3);
-                dk_set_led_on(DK_LED4);
-                LOG_INF("Received '1': LED 2 & 4 ON");
-                break;
-            case '2':
-                /* For '2', we START blinking if not already */
-                if (!is_blinking) {
-                    printk("Processed '2': BLINKING ALL\n");
-                    is_blinking = true;
-                    k_work_schedule(&blink_work, K_NO_WAIT);
-
-                }
-                break;
-            case '3':
-                /* Example for 3: Just LED 4 */
-                dk_set_led_off(DK_LED1);
-                dk_set_led_off(DK_LED2);
-                dk_set_led_off(DK_LED3);
-                dk_set_led_on(DK_LED4);
-                LOG_INF("Processed '3': LED 4 ON (Static)");
-                break;
-            default:
-                break;
-        }
+    switch (cmd) {
+        case 'L':
+            /* Blink left LEDS on dk */
+            current_blink = (current_blink == BLINK_LEFT) ? BLINK_NONE : BLINK_LEFT;
+            break;
+        case 'R':
+            /* Blink right LEDS on dk */
+            current_blink = (current_blink == BLINK_RIGHT) ? BLINK_NONE : BLINK_RIGHT;
+            break;
+        case 'Z':
+            /* Blink all LEDS on dk */
+            current_blink = (current_blink == BLINK_HAZARD) ? BLINK_NONE : BLINK_HAZARD;
+            break;
+        case 'F':
+            /* Turns top LEDS on/off */
+            headlight_on = !headlight_on;
+            break;
+        case 'H':
+            /* Turns bottom LEDS on */
+            horn_on = true;
+            break;
+        case 'h':
+            horn_on = false;
+            break;
+        default:
+            LOG_INF("Unknown command received");
+            break;
+    }
+    
+    if (current_blink != BLINK_NONE) {
+        k_work_reschedule(&blink_work, K_NO_WAIT);
+    } else {
+        k_work_cancel_delayable(&blink_work);
+        update_leds(false);
+        // update_car_outputs(false);
     }
 
     return BT_GATT_ITER_CONTINUE;
