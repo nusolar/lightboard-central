@@ -66,6 +66,18 @@ static K_FIFO_DEFINE(fifo_uart_rx_data);
 static struct bt_conn *default_conn;
 static struct bt_nus_client nus_client;
 
+static const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+
+#define PIN_STROBE     0  // P0.00
+#define PIN_LEFT_TURN  1  // P0.01
+#define PIN_STROBE_IN  2  // P0.02
+#define PIN_HORN       3  // P0.03
+#define PIN_HEADLIGHT  4  // P0.04
+#define PIN_RIGHT_TURN 8  // P1.08
+
+static struct gpio_callback gpio0_cb;
+
 enum blink_state_t {
     BLINK_NONE,
     BLINK_LEFT,
@@ -674,6 +686,65 @@ static struct bt_conn_auth_info_cb conn_auth_info_callbacks = {
     .pairing_failed = pairing_failed
 };
 
+static void configure_car_outputs(void) {
+    int err;
+
+    err = !device_is_ready(gpio0);
+    if (err) {
+        LOG_ERR("GPIO port 0 not ready!");
+    }
+
+    err = !device_is_ready(gpio1);
+    if (err) {
+        LOG_ERR("GPIO port 1 not ready!");
+    }
+
+    gpio_pin_configure(gpio0, PIN_STROBE_IN, GPIO_INPUT | GPIO_PULL_DOWN);
+    gpio_pin_interrupt_configure(gpio0, PIN_STROBE_IN, GPIO_INT_EDGE_RISING);
+
+    gpio_init_callback(&gpio0_cb, port0_changed, BIT(PIN_STROBE_IN));
+    gpio_add_callback(gpio0, &gpio0_cb);
+
+    gpio_pin_configure(gpio0, PIN_STROBE, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure(gpio0, PIN_LEFT_TURN, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure(gpio0, PIN_HORN, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure(gpio0, PIN_HEADLIGHT, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure(gpio1, PIN_RIGHT_TURN, GPIO_OUTPUT_INACTIVE);
+}
+
+static void update_car_outputs(bool blink_toggle_state) {
+    bool horn_state = horn_on;
+    bool headlight_state = headlight_on;
+    bool left_state = false;
+    bool right_state = false;
+    bool strobe_state = false;
+
+    if (current_blink != BLINK_NONE && blink_toggle_state) {
+        if (current_blink == BLINK_LEFT) {
+            left_state = true;
+        } else if (current_blink == BLINK_RIGHT) {
+            right_state = true;
+        } else {
+            left_state = true;
+            right_state = true;
+        }
+    }
+
+    gpio_pin_set(gpio0, PIN_LEFT_TURN, left_state ? 1 : 0);
+    gpio_pin_set(gpio1, PIN_RIGHT_TURN, right_state ? 1 : 0);
+    gpio_pin_set(gpio0, PIN_HORN, horn_state ? 1 : 0);
+    gpio_pin_set(gpio0, PIN_HEADLIGHT, headlight_state ? 1 : 0);
+    gpio_pin_set(gpio0, PIN_STROBE, strobe_state ? 1 : 0);
+}
+
+void port0_changed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+  if (pins & BIT(PIN_STROBE_IN)) {
+    LOG_INF("STROBE HIGH");
+    gpio_pin_toggle(gpio0, PIN_STROBE);
+  }
+}
+
 int main(void)
 {
     int err;
@@ -724,6 +795,8 @@ int main(void)
     if (err) {
         return 0;
     }
+
+    // configure_car_outputs();
 
     printk("Starting Bluetooth Central\n");
 
