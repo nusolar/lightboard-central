@@ -144,32 +144,22 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
     LOG_INF("Car Command Received: %c\n", cmd);
 
     switch (cmd) {
-        case 'L':
-            /* Blink left LEDS on dk */
-            current_blink = (current_blink == BLINK_LEFT) ? BLINK_NONE : BLINK_LEFT;
-            break;
-        case 'R':
-            /* Blink right LEDS on dk */
-            current_blink = (current_blink == BLINK_RIGHT) ? BLINK_NONE : BLINK_RIGHT;
-            break;
-        case 'Z':
-            /* Blink all LEDS on dk */
-            current_blink = (current_blink == BLINK_HAZARD) ? BLINK_NONE : BLINK_HAZARD;
-            break;
-        case 'F':
-            /* Turns top LEDS on/off */
-            headlight_on = !headlight_on;
-            break;
-        case 'H':
-            /* Turns bottom LEDS on */
-            horn_on = true;
-            break;
-        case 'h':
-            horn_on = false;
-            break;
-        default:
-            LOG_INF("Unknown command received");
-            break;
+        case 'L': current_blink = BLINK_LEFT; break;
+        case 'l': if (current_blink == BLINK_LEFT) current_blink = BLINK_NONE; break;
+
+        case 'R': current_blink = BLINK_RIGHT; break;
+        case 'r': if (current_blink == BLINK_RIGHT) current_blink = BLINK_NONE; break;
+
+        case 'Z': current_blink = BLINK_HAZARD; break;
+        case 'z': if (current_blink == BLINK_HAZARD) current_blink = BLINK_NONE; break;
+
+        case 'F': headlight_on = true; break;
+        case 'f': headlight_on = false; break;
+
+        case 'H': horn_on = true; break;
+        case 'h': horn_on = false; break;
+        
+        default: LOG_INF("Unknown command received"); break;
     }
     
     if (current_blink != BLINK_NONE) {
