@@ -1,115 +1,122 @@
-.. _central_uart:
+Lightboard — Central (Lightboard Unit)
+======================================
 
-Bluetooth: Central UART
-#######################
+Firmware for the lightboard half of Northwestern's solar-car **Lightboard**
+system. This board sits near the car battery and drives all high-power
+outputs: headlights, brake/turn lights, hazards, horn, and the
+battery-fault strobe. It has two distinct input sources:
 
-.. contents::
-   :local:
-   :depth: 2
+1. **BLE commands from the steering wheel** (``../peripheral/``), parsed
+   in ``ble_data_received``.
+2. **Direct GPIO inputs from elsewhere on the car** — currently the
+   strobe trigger, eventually the brake pedal, and likely more as the
+   car grows.
 
-The Central UART sample demonstrates how to use the :ref:`nus_client_readme`.
-It uses the NUS Client to send data back and forth between a UART connection and a Bluetooth® LE connection, emulating a serial port over Bluetooth LE.
+This is the integration point of the lights system: assume new
+"something happens on the car → a light turns on" features land here,
+not on the steering-wheel board.
 
-Requirements
-************
+Hardware
+--------
 
-The sample supports the following development kits:
+- **MCU:** Nordic nRF54L15 (custom PCB; also builds for ``nrf54l15dk``).
+- **Outputs:** GPIO lines that gate the high-side switches feeding the
+  LED strips, horn, and strobe lamp.
+- **Power / programming:** SWD header on the custom PCB, programmed
+  from an nRF5340 DK acting as a J-Link.
 
-.. table-from-sample-yaml::
+GPIO map
+~~~~~~~~
 
-.. include:: /includes/tfm.txt
+==================  ==========  =============================  =================================================================
+Signal              nRF54L15    Direction                       Notes
+==================  ==========  =============================  =================================================================
+``LEFT_TURN`` out   P0.01       Output                          Steady or 500 ms blink, depending on ``current_blink``.
+``RIGHT_TURN`` out  P1.08       Output                          Steady or 500 ms blink.
+``HORN`` out        P0.03       Output                          Steady on/off.
+``HEADLIGHT`` out   P0.04       Output                          Steady on/off.
+``STROBE_OUT``      P0.00       Output                          Central-generated blink while ``STROBE_IN`` is asserted. **Stub.**
+``STROBE_IN``       P0.02       Input, pull-down, edge IRQ      Steady fault assert from external battery-monitor circuit. **Stub.**
+==================  ==========  =============================  =================================================================
 
-The sample also requires another development kit running a compatible application (see :ref:`peripheral_uart`).
+Pin assignments are confirmed against the as-built central PCB; the
+firmware is the source of truth.
 
-Overview
-********
+Wire protocol (received)
+------------------------
 
-When connected, the sample forwards any data received on the RX pin of the UART 1 peripheral to the Bluetooth LE unit.
-On Nordic Semiconductor's development kits, the UART 1 peripheral is typically gated through the SEGGER chip to a USB CDC virtual serial port.
+One ASCII byte per BLE NUS write from the steering wheel.
+**Uppercase = ON / pressed, lowercase = OFF / released.** Unknown bytes
+log a warning. ``\r``/``\n`` are ignored.
 
-Any data sent from the Bluetooth LE unit is sent out of the UART 1 peripheral's TX pin.
+==========  ============================
+Char        Meaning
+==========  ============================
+``L`` / ``l``   Left turn signal
+``R`` / ``r``   Right turn signal
+``Z`` / ``z``   Hazard (both blink)
+``F`` / ``f``   Headlights
+``H`` / ``h``   Horn
+==========  ============================
 
+The protocol is steering-wheel inputs only. Brake-pedal and
+strobe-trigger inputs are wired directly into this board's GPIO and
+never travel over BLE.
 
-.. _central_uart_debug:
+Build & flash
+-------------
 
-Debugging
-*********
+Primary workflow is the **nRF Connect for VS Code** extension — the
+Build / Flash buttons handle this app against the
+``nrf54l15dk/nrf54l15/cpuapp`` board target.
 
-In this sample, a UART console is used to send and read data over the NUS Client.
-Debug messages are not displayed in the UART console, but are printed by the RTT logger instead.
+CLI equivalent::
 
-If you want to view the debug messages, follow the procedure in :ref:`testing_rtt_connect`.
+    west build -b nrf54l15dk/nrf54l15/cpuapp --sysbuild
+    west flash
 
-FEM support
-***********
+Sysbuild is required (the IPC-radio image lives in ``sysbuild/ipc_radio``).
+When multiple J-Links are connected, pick the target in the VS Code
+extension's flash dialog or pass ``--dev-id <segger-serial>`` on the CLI.
 
-.. include:: /includes/sample_fem_support.txt
+A stale ``build_1/`` directory is checked into the working tree — ignore
+it; only ``build/`` is the live output.
 
+Logs
+----
 
-Building and running
-********************
-.. |sample path| replace:: :file:`samples/bluetooth/central_uart`
+UART/console is intentionally torn out in ``app.overlay``; logging goes
+over **SEGGER RTT** only (``CONFIG_LOG_BACKEND_RTT=y``,
+``CONFIG_LOG_BACKEND_UART=n``). The custom PCB doesn't expose a serial
+path. Read with the VS Code "RTT" terminal, ``JLinkRTTViewer``, or
+``nrfutil device rtt``.
 
-.. include:: /includes/build_and_run_ns.txt
+BLE / pairing
+-------------
 
-.. |sample_or_app| replace:: sample
-.. |ipc_radio_dir| replace:: :file:`sysbuild/ipc_radio`
+- BLE Central. Scans for the steering wheel's NUS service UUID plus any
+  bonded-address filters, and reconnects automatically on disconnect.
+- Pairing is **Just Works** — neither side has a passkey display or
+  input. First connection bonds automatically; bond persists in flash
+  via the Settings subsystem and is reloaded on boot.
+- Vestigial passkey scaffolding (``KEY_PASSKEY_ACCEPT/REJECT``,
+  ``conn_auth_callbacks``, etc.) is still present in ``src/main.c`` from
+  the Nordic sample but is unreachable in practice — Just Works is the
+  actual mode. Safe to delete when next touching that area.
 
-.. include:: /includes/ipc_radio_conf.txt
+DK-as-central bench history
+---------------------------
 
-.. include:: /includes/nRF54H20_erase_UICR.txt
+Before the central PCB arrived, an **nRF5340 DK flashed with this
+image** acted as a stand-in for the lightboard. The DK's four on-board
+LEDs mirrored what the GPIO outputs would do (see ``update_leds()`` —
+all call sites are now commented out). The custom central PCB has no
+LEDs, so ``update_leds()`` would be a no-op there even if reactivated;
+keep it for future DK-based debugging only.
 
-.. _central_uart_testing:
+Provenance
+----------
 
-Testing
-=======
-
-|test_sample|
-
-1. |connect_kit|
-#. |connect_terminal_specific|
-#. Optionally, connect the RTT console to display debug messages. See :ref:`central_uart_debug`.
-#. Reset the kit.
-#. Observe that the text "Starting Bluetooth Central UART sample" is printed on the COM listener running on the computer and the device starts scanning for Peripherals with NUS.
-#. Program the :ref:`peripheral_uart` sample to the second development kit.
-   See the documentation for that sample for detailed instructions.
-#. Observe that the kits connect.
-
-   When service discovery is completed, the event logs are printed on the Central's terminal.
-   Now you can send data between the two kits.
-#. To send data, type some characters in the terminal of one of the kits and press Enter.
-   Observe that the data is displayed on the UART on the other kit.
-#. Disconnect the devices by, for example, pressing the Reset button on the Central.
-   Observe that the kits automatically reconnect and that it is again possible to send data between the two kits.
-
-Dependencies
-************
-
-This sample uses the following |NCS| libraries:
-
-* :ref:`nus_client_readme`
-* :ref:`gatt_dm_readme`
-* :ref:`nrf_bt_scan_readme`
-
-In addition, it uses the following Zephyr libraries:
-
-* :file:`include/zephyr/types.h`
-* :file:`boards/arm/nrf*/board.h`
-* :ref:`zephyr:kernel_api`:
-
-  * :file:`include/kernel.h`
-
-* :ref:`zephyr:api_peripherals`:
-
-   * :file:`include/uart.h`
-
-* :ref:`zephyr:bluetooth_api`:
-
-  * :file:`include/bluetooth/bluetooth.h`
-  * :file:`include/bluetooth/gatt.h`
-  * :file:`include/bluetooth/hci.h`
-  * :file:`include/bluetooth/uuid.h`
-
-The sample also uses the following secure firmware component:
-
-* :ref:`Trusted Firmware-M <ug_tfm>`
+Started from the Nordic ``central_uart`` sample (NCS 3.1.0). The
+vestigial ``sample.yaml`` and Nordic copyright header in ``src/main.c``
+are leftovers from that origin and don't reflect current behavior.
