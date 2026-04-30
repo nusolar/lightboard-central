@@ -1,24 +1,50 @@
 /*
- * Copyright (c) 2023 Nordic Semiconductor ASA
+ * Copyright (c) 2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
 / {
-	 chosen {
-		 nordic,nus-uart = &uart0;
-	 };
+    // Remove UART
+    chosen {
+        /delete-property/ zephyr,console;
+        /delete-property/ zephyr,shell-uart;
+        /delete-property/ zephyr,uart-mcumgr;
+        /delete-property/ zephyr,bt-mon-uart;
+        /delete-property/ zephyr,bt-c2h-uart;
+        /delete-property/ nordic,nus-uart;
+    };
+
+    // Unmap the DevKit hardware from the system aliases
+    aliases {
+        /delete-property/ led0;
+        /delete-property/ led1;
+        /delete-property/ led2;
+        /delete-property/ led3;
+        /delete-property/ pwm-led0;
+        /delete-property/ sw0;
+        /delete-property/ sw1;
+        /delete-property/ sw2;
+        /delete-property/ sw3;
+    };
+
+    // Erase the physical DevKit buttons and LEDs
+    /delete-node/ leds;
+    /delete-node/ pwmleds;
+    /delete-node/ buttons;
 };
 
+&uart20 { status = "disabled"; };
+&uart30 { status = "disabled"; };
+&spi00 { status = "disabled"; };
+&pwm20 { status = "disabled"; };
+&adc   { status = "disabled"; };
+&nfct  { status = "disabled"; };
 
-&i2c1 {
-    status = "disabled";
+&gpio0 {
+    status = "okay";
 };
 
-&spi2 {
-    status = "disabled";
-};
-
-&adc {
-    status = "disabled";
+&gpio1 {
+    status = "okay";
 };
