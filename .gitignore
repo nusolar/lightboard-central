@@ -10,3 +10,6 @@ CLAUDE.md
 .claude/
 .claude-mem/
 .claudeignore
+
+# macos
+.DS_Store
