@@ -9,8 +9,7 @@ battery-fault strobe. It has two distinct input sources:
 1. **BLE commands from the steering wheel** (``../peripheral/``), parsed
    in ``ble_data_received``.
 2. **Direct GPIO inputs from elsewhere on the car** — currently the
-   strobe trigger, eventually the brake pedal, and likely more as the
-   car grows.
+   strobe trigger, with likely additions as the car grows.
 
 This is the integration point of the lights system: assume new
 "something happens on the car → a light turns on" features land here,
@@ -35,8 +34,8 @@ Signal              nRF54L15    Direction                       Notes
 ``RIGHT_TURN`` out  P1.08       Output                          Steady or 500 ms blink.
 ``HORN`` out        P0.03       Output                          Steady on/off.
 ``HEADLIGHT`` out   P0.04       Output                          Steady on/off.
-``STROBE_OUT``      P0.00       Output                          Central-generated blink while ``STROBE_IN`` is asserted. **Stub.**
-``STROBE_IN``       P0.02       Input, pull-down, edge IRQ      Steady fault assert from external battery-monitor circuit. **Stub.**
+``STROBE_OUT``      P0.00       Output                          Central-generated blink while ``STROBE_IN`` is asserted.
+``STROBE_IN``       P0.02       Input, pull-down, edge IRQ      Steady fault assert from external battery-monitor circuit.
 ==================  ==========  =============================  =================================================================
 
 Pin assignments are confirmed against the as-built central PCB; the
@@ -79,9 +78,6 @@ Sysbuild is required (the IPC-radio image lives in ``sysbuild/ipc_radio``).
 When multiple J-Links are connected, pick the target in the VS Code
 extension's flash dialog or pass ``--dev-id <segger-serial>`` on the CLI.
 
-A stale ``build_1/`` directory is checked into the working tree — ignore
-it; only ``build/`` is the live output.
-
 Logs
 ----
 
@@ -99,24 +95,10 @@ BLE / pairing
 - Pairing is **Just Works** — neither side has a passkey display or
   input. First connection bonds automatically; bond persists in flash
   via the Settings subsystem and is reloaded on boot.
-- Vestigial passkey scaffolding (``KEY_PASSKEY_ACCEPT/REJECT``,
-  ``conn_auth_callbacks``, etc.) is still present in ``src/main.c`` from
-  the Nordic sample but is unreachable in practice — Just Works is the
-  actual mode. Safe to delete when next touching that area.
-
-DK-as-central bench history
----------------------------
-
-Before the central PCB arrived, an **nRF5340 DK flashed with this
-image** acted as a stand-in for the lightboard. The DK's four on-board
-LEDs mirrored what the GPIO outputs would do (see ``update_leds()`` —
-all call sites are now commented out). The custom central PCB has no
-LEDs, so ``update_leds()`` would be a no-op there even if reactivated;
-keep it for future DK-based debugging only.
 
 Provenance
 ----------
 
-Started from the Nordic ``central_uart`` sample (NCS 3.1.0). The
-vestigial ``sample.yaml`` and Nordic copyright header in ``src/main.c``
-are leftovers from that origin and don't reflect current behavior.
+Started from the Nordic ``central_uart`` sample (NCS 3.1.0). The Nordic
+copyright header in ``src/main.c`` is a leftover from that origin and
+doesn't reflect current behavior.

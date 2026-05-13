@@ -53,6 +53,8 @@ static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
 static struct gpio_callback gpio0_cb;
 
+#define STROBE_PERIOD_MS 250
+#define BLINK_PERIOD_MS 500
 static struct k_work_delayable strobe_work;
 
 /* Single-state turn-signal machine. Hazard is its own state, not LEFT | RIGHT,
@@ -72,16 +74,17 @@ static struct k_work_delayable blink_work;
 static bool headlight_on = false;
 static bool horn_on = false;
 
-/* Single point of truth for every output pin. Called on each blink-handler tick
- * (with the current toggle phase) and whenever a BLE command shifts state.
- * Turn signals only assert when current_blink != NONE *and* the toggle is high,
- * so the same routine handles steady state and the blink phase in one shot. */
+/* Single point of truth for every output pin driven by steering-wheel commands.
+ * Strobe is independent (own input source, own cadence, own writer in
+ * strobe_handler) and is intentionally not touched here. Called on each blink-
+ * handler tick (with the current toggle phase) and whenever a BLE command shifts
+ * state. Turn signals only assert when current_blink != NONE *and* the toggle is
+ * high, so the same routine handles steady state and the blink phase in one shot. */
 static void update_car_outputs(bool blink_toggle_state) {
     bool horn_state = horn_on;
     bool headlight_state = headlight_on;
     bool left_state = false;
     bool right_state = false;
-    bool strobe_state = false;
 
     if (current_blink != BLINK_NONE && blink_toggle_state) {
         if (current_blink == BLINK_LEFT) {
@@ -98,7 +101,9 @@ static void update_car_outputs(bool blink_toggle_state) {
     gpio_pin_set(gpio1, PIN_RIGHT_TURN, right_state ? 1 : 0);
     gpio_pin_set(gpio0, PIN_HORN, horn_state ? 1 : 0);
     gpio_pin_set(gpio0, PIN_HEADLIGHT, headlight_state ? 1 : 0);
-    gpio_pin_set(gpio0, PIN_STROBE_OUT, strobe_state ? 1 : 0);
+
+    LOG_INF("Outputs: L=%d R=%d HORN=%d HEAD=%d",
+            left_state, right_state, horn_state, headlight_state);
 }
 
 /* 500 ms-toggle work item. Re-arms itself while a turn signal is active;
@@ -111,7 +116,7 @@ static void blink_handler(struct k_work *work)
     update_car_outputs(toggle_state);
 
     if (current_blink != BLINK_NONE) {
-        k_work_reschedule(&blink_work, K_MSEC(500));
+        k_work_reschedule(&blink_work, K_MSEC(BLINK_PERIOD_MS));
     } else {
         update_car_outputs(false);
     }
@@ -173,8 +178,6 @@ static void discovery_complete(struct bt_gatt_dm *dm, void *context)
     struct bt_nus_client *nus = context;
     LOG_INF("Service discovery completed");
 
-    bt_gatt_dm_data_print(dm);
-
     bt_nus_handles_assign(dm, nus);
     bt_nus_subscribe_receive(nus);
 
@@ -223,17 +226,11 @@ static void connected(struct bt_conn *conn, uint8_t conn_err)
     if (conn_err) {
         LOG_INF("Failed to connect to %s, 0x%02x %s", addr, conn_err,
             bt_hci_err_to_str(conn_err));
-
-        if (default_conn == conn) {
-            bt_conn_unref(default_conn);
-            default_conn = NULL;
-
-            (void)k_work_submit(&scan_work);
-        }
-
+        (void)k_work_submit(&scan_work);
         return;
     }
 
+    default_conn = bt_conn_ref(conn);
     LOG_INF("Connected: %s", addr);
 
     /* Request encryption + (re)bond. On success, security_changed kicks off
@@ -245,14 +242,13 @@ static void connected(struct bt_conn *conn, uint8_t conn_err)
     }
 
     err = bt_scan_stop();
-    if ((!err) && (err != -EALREADY)) {
+    if (err && err != -EALREADY) {
         LOG_ERR("Stop LE scan failed (err %d)", err);
     }
 }
 
-/* Drop the conn ref, clear default_conn, and re-arm scanning. Bonded peers
- * reconnect quickly because scan_start re-adds their address filter at boot
- * (and the bond persists across resets). */
+/* Drop the conn ref, clear default_conn, and re-arm scanning. The bond persists
+ * across resets, so the rescan auto-reconnects the same peer once it advertises. */
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     char addr[BT_ADDR_LE_STR_LEN];
@@ -297,27 +293,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .security_changed = security_changed
 };
 
-/* Diagnostic: log every scan response that matched a filter. Useful during
- * bring-up to confirm the central is actually seeing the peripheral. */
-static void scan_filter_match(struct bt_scan_device_info *device_info,
-                  struct bt_scan_filter_match *filter_match,
-                  bool connectable)
-{
-    char addr[BT_ADDR_LE_STR_LEN];
-
-    bt_addr_le_to_str(device_info->recv_info->addr, addr, sizeof(addr));
-
-    LOG_INF("Filters matched. Address: %s connectable: %d", addr, connectable);
-}
-
-/* Auto-connect started — capture the conn ref now so connected() and
- * disconnected() can reconcile against default_conn. */
-static void scan_connecting(struct bt_scan_device_info *device_info,
-                struct bt_conn *conn)
-{
-    default_conn = bt_conn_ref(conn);
-}
-
 /* Initialize the NUS client. Only the receive callback is wired up; the
  * central never sends to the peripheral, so .sent is omitted. */
 static int nus_client_init(void)
@@ -339,46 +314,12 @@ static int nus_client_init(void)
     return err;
 }
 
-/* Macro slots: filter_match, filter_no_match, connecting_error, connecting.
- * We only use filter_match (diagnostic) and connecting (capture conn ref). */
-BT_SCAN_CB_INIT(scan_cb, scan_filter_match, NULL, NULL, scan_connecting);
-
-/* For each bonded peer, add its address to the scan filter alongside the NUS
- * UUID filter — lets us reconnect specifically to a paired peripheral instead
- * of any nearby NUS device. Skip bonds we're already connected to. */
-static void try_add_address_filter(const struct bt_bond_info *info, void *user_data)
-{
-    int err;
-    char addr[BT_ADDR_LE_STR_LEN];
-    uint8_t *filter_mode = user_data;
-
-    bt_addr_le_to_str(&info->addr, addr, sizeof(addr));
-
-    struct bt_conn *conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &info->addr);
-
-    if (conn) {
-        bt_conn_unref(conn);
-        return;
-    }
-
-    err = bt_scan_filter_add(BT_SCAN_FILTER_TYPE_ADDR, &info->addr);
-    if (err) {
-        LOG_ERR("Address filter cannot be added (err %d): %s", err, addr);
-        return;
-    }
-
-    LOG_INF("Address filter added: %s", addr);
-    *filter_mode |= BT_SCAN_ADDR_FILTER;
-}
-
-/* (Re)arm scanning. Sets up the NUS UUID filter plus address filters for any
- * bonded peers, then enables active scanning so the peripheral's scan-response
- * (which carries the NUS UUID) is visible. Called at boot and from
+/* (Re)arm scanning with a NUS UUID filter so the peripheral's scan-response
+ * (which carries the NUS UUID) gets matched. Called at boot and from
  * scan_work_handler after a disconnect. */
 static int scan_start(void)
 {
     int err;
-    uint8_t filter_mode = 0;
 
     err = bt_scan_stop();
     if (err) {
@@ -386,7 +327,6 @@ static int scan_start(void)
         return err;
     }
 
-    /* Wipe filters from any prior scan_start so we can rebuild from scratch. */
     bt_scan_filter_remove_all();
 
     err = bt_scan_filter_add(BT_SCAN_FILTER_TYPE_UUID, BT_UUID_NUS_SERVICE);
@@ -394,12 +334,8 @@ static int scan_start(void)
         LOG_ERR("UUID filter cannot be added (err %d)", err);
         return err;
     }
-    filter_mode |= BT_SCAN_UUID_FILTER;
 
-    bt_foreach_bond(BT_ID_DEFAULT, try_add_address_filter, &filter_mode);
-
-    /* false = match-any: connect on UUID match OR bonded-address match (OR, not AND). */
-    err = bt_scan_filter_enable(filter_mode, false);
+    err = bt_scan_filter_enable(BT_SCAN_UUID_FILTER, false);
     if (err) {
         LOG_ERR("Filters cannot be turned on (err %d)", err);
         return err;
@@ -433,18 +369,29 @@ static void scan_init(void)
     };
 
     bt_scan_init(&scan_init);
-    bt_scan_cb_register(&scan_cb);
 
     k_work_init(&scan_work, scan_work_handler);
     LOG_INF("Scan module initialized");
 }
 
-/* TODO: while STROBE_IN is asserted (steady fault from the battery monitor),
- * drive STROBE_OUT in a self-generated blink cadence. Currently only logs.
- * BUG: reads PIN_HORN below — should be PIN_STROBE_IN. */
+/* While STROBE_IN is asserted (steady fault from the battery monitor), self-rearm
+ * to toggle STROBE_OUT at STROBE_PERIOD_MS. When STROBE_IN goes low, drop the
+ * output and stop rescheduling. This handler also serves as the post-IRQ debounce:
+ * port0_changed schedules us 30 ms after the edge, and k_work_reschedule's
+ * cancel-and-replace semantics let a falling edge cleanly preempt an in-flight
+ * blink tick. */
 static void strobe_handler(struct k_work *work) {
-    bool on = gpio_pin_get(gpio0, PIN_HORN) == 1;
-    LOG_INF("Strobe %s", on ? "ON" : "OFF");
+    static bool strobe_on = false;
+    bool fault_active = gpio_pin_get(gpio0, PIN_STROBE_IN) == 1;
+
+    if (fault_active) {
+        strobe_on = !strobe_on;
+        gpio_pin_set(gpio0, PIN_STROBE_OUT, strobe_on ? 1 : 0);
+        k_work_reschedule(&strobe_work, K_MSEC(STROBE_PERIOD_MS));
+    } else {
+        strobe_on = false;
+        gpio_pin_set(gpio0, PIN_STROBE_OUT, 0);
+    }
 }
 
 /* GPIO ISR for gpio0 — defer the read by 30 ms to debounce. */
@@ -485,6 +432,13 @@ static void configure_car_outputs(void) {
     gpio_pin_configure(gpio1, PIN_RIGHT_TURN, GPIO_OUTPUT_INACTIVE);
 
     k_work_init_delayable(&strobe_work, strobe_handler);
+
+    /* If the fault line is already asserted at boot, we missed the rising edge —
+     * kick off the strobe loop manually so it doesn't sit idle until the next
+     * low→high cycle. */
+    if (gpio_pin_get(gpio0, PIN_STROBE_IN) == 1) {
+        k_work_reschedule(&strobe_work, K_NO_WAIT);
+    }
 
     LOG_INF("GPIO configured");
 }
