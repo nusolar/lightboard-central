@@ -7,7 +7,6 @@
 /** @file
  * @brief Lightboard central. Connects to the steering-wheel peripheral over BLE
  *        NUS, parses 1-byte commands, and drives the car's lighting GPIOs.
- *        See ../CLAUDE.md for the cross-app architecture notes.
  */
 
 #include <errno.h>
@@ -18,7 +17,6 @@
 #include <zephyr/drivers/gpio.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
-#include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
@@ -29,11 +27,6 @@
 #include <bluetooth/scan.h>
 
 #include <zephyr/settings/settings.h>
-
-#include <zephyr/logging/log.h>
-
-#define LOG_MODULE_NAME central
-LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 static struct k_work scan_work;
 static struct bt_conn *default_conn;
@@ -101,15 +94,13 @@ static void update_car_outputs(bool blink_toggle_state) {
     gpio_pin_set(gpio1, PIN_RIGHT_TURN, right_state ? 1 : 0);
     gpio_pin_set(gpio0, PIN_HORN, horn_state ? 1 : 0);
     gpio_pin_set(gpio0, PIN_HEADLIGHT, headlight_state ? 1 : 0);
-
-    LOG_INF("Outputs: L=%d R=%d HORN=%d HEAD=%d",
-            left_state, right_state, horn_state, headlight_state);
 }
 
 /* 500 ms-toggle work item. Re-arms itself while a turn signal is active;
  * the final tick clears outputs and the work doesn't re-arm. */
 static void blink_handler(struct k_work *work)
 {
+    ARG_UNUSED(work);
     static bool toggle_state = false;
     toggle_state = !toggle_state;
 
@@ -136,8 +127,6 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
     }
     char cmd = data[0];
 
-    LOG_INF("Car Command Received: %c", cmd);
-
     /* 1-byte ASCII protocol from the steering wheel. Uppercase = ON / pressed,
      * lowercase = OFF / released. Lowercase only clears its own direction so a
      * stale 'l' release doesn't cancel a newer right turn (and vice versa). */
@@ -157,7 +146,7 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
         case 'H': horn_on = true; break;
         case 'h': horn_on = false; break;
 
-        default: LOG_INF("Unknown command received"); break;
+        default: break;
     }
 
     if (current_blink != BLINK_NONE) {
@@ -176,7 +165,6 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
 static void discovery_complete(struct bt_gatt_dm *dm, void *context)
 {
     struct bt_nus_client *nus = context;
-    LOG_INF("Service discovery completed");
 
     bt_nus_handles_assign(dm, nus);
     bt_nus_subscribe_receive(nus);
@@ -188,7 +176,9 @@ static void discovery_complete(struct bt_gatt_dm *dm, void *context)
  * which scan_work re-arms scanning. */
 static void discovery_error(struct bt_conn *conn, int err, void *context)
 {
-    LOG_WRN("Error while discovering GATT database: (%d)", err);
+    ARG_UNUSED(conn);
+    ARG_UNUSED(err);
+    ARG_UNUSED(context);
 }
 
 struct bt_gatt_dm_cb discovery_cb = {
@@ -200,17 +190,12 @@ struct bt_gatt_dm_cb discovery_cb = {
  * and from connected() if security setup failed. */
 static void gatt_discover(struct bt_conn *conn)
 {
-    int err;
-
     /* Defends against stale callbacks from a previous connection attempt. */
     if (conn != default_conn) {
         return;
     }
 
-    err = bt_gatt_dm_start(conn, BT_UUID_NUS_SERVICE, &discovery_cb, &nus_client);
-    if (err) {
-        LOG_ERR("could not start the discovery procedure, error code: %d", err);
-    }
+    (void)bt_gatt_dm_start(conn, BT_UUID_NUS_SERVICE, &discovery_cb, &nus_client);
 }
 
 /* Connection callback. On failure, drop default_conn and re-arm scanning. On
@@ -218,44 +203,30 @@ static void gatt_discover(struct bt_conn *conn)
  * trigger GATT discovery — and stop active scanning while we have a peer. */
 static void connected(struct bt_conn *conn, uint8_t conn_err)
 {
-    char addr[BT_ADDR_LE_STR_LEN];
     int err;
 
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
     if (conn_err) {
-        LOG_INF("Failed to connect to %s, 0x%02x %s", addr, conn_err,
-            bt_hci_err_to_str(conn_err));
         (void)k_work_submit(&scan_work);
         return;
     }
 
     default_conn = bt_conn_ref(conn);
-    LOG_INF("Connected: %s", addr);
 
     /* Request encryption + (re)bond. On success, security_changed kicks off
      * GATT discovery; on failure we fall through and discover unencrypted. */
     err = bt_conn_set_security(conn, BT_SECURITY_L2);
     if (err) {
-        LOG_WRN("Failed to set security: %d", err);
         gatt_discover(conn);
     }
 
-    err = bt_scan_stop();
-    if (err && err != -EALREADY) {
-        LOG_ERR("Stop LE scan failed (err %d)", err);
-    }
+    (void)bt_scan_stop();
 }
 
 /* Drop the conn ref, clear default_conn, and re-arm scanning. The bond persists
  * across resets, so the rescan auto-reconnects the same peer once it advertises. */
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-    char addr[BT_ADDR_LE_STR_LEN];
-
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-    LOG_INF("Disconnected: %s, reason 0x%02x %s", addr, reason, bt_hci_err_to_str(reason));
+    ARG_UNUSED(reason);
 
     if (default_conn != conn) {
         return;
@@ -268,21 +239,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 }
 
 /* SMP outcome (Just Works pairing for us). On success this is what triggers
- * GATT discovery; on failure we still call gatt_discover so the next failure
- * surfaces in the log instead of going silent. */
+ * GATT discovery; on failure we still call gatt_discover so the link can keep
+ * progressing without security. */
 static void security_changed(struct bt_conn *conn, bt_security_t level,
                  enum bt_security_err err)
 {
-    char addr[BT_ADDR_LE_STR_LEN];
-
-    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-    if (!err) {
-        LOG_INF("Security changed: %s level %u", addr, level);
-    } else {
-        LOG_WRN("Security failed: %s level %u err %d %s", addr, level, err,
-            bt_security_err_to_str(err));
-    }
+    ARG_UNUSED(level);
+    ARG_UNUSED(err);
 
     gatt_discover(conn);
 }
@@ -306,12 +269,10 @@ static int nus_client_init(void)
 
     err = bt_nus_client_init(&nus_client, &init);
     if (err) {
-        LOG_ERR("NUS Client initialization failed (err %d)", err);
         return err;
     }
 
-    LOG_INF("NUS Client module initialized");
-    return err;
+    return 0;
 }
 
 /* (Re)arm scanning with a NUS UUID filter so the peripheral's scan-response
@@ -322,8 +283,7 @@ static int scan_start(void)
     int err;
 
     err = bt_scan_stop();
-    if (err) {
-        LOG_ERR("Failed to stop scanning (err %d)", err);
+    if (err && err != -EALREADY) {
         return err;
     }
 
@@ -331,23 +291,19 @@ static int scan_start(void)
 
     err = bt_scan_filter_add(BT_SCAN_FILTER_TYPE_UUID, BT_UUID_NUS_SERVICE);
     if (err) {
-        LOG_ERR("UUID filter cannot be added (err %d)", err);
         return err;
     }
 
     err = bt_scan_filter_enable(BT_SCAN_UUID_FILTER, false);
     if (err) {
-        LOG_ERR("Filters cannot be turned on (err %d)", err);
         return err;
     }
 
     err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
     if (err) {
-        LOG_ERR("Scanning failed to start (err %d)", err);
         return err;
     }
 
-    LOG_INF("Scan started");
     return 0;
 }
 
@@ -371,7 +327,6 @@ static void scan_init(void)
     bt_scan_init(&scan_init);
 
     k_work_init(&scan_work, scan_work_handler);
-    LOG_INF("Scan module initialized");
 }
 
 /* While STROBE_IN is asserted (steady fault from the battery monitor), self-rearm
@@ -381,6 +336,7 @@ static void scan_init(void)
  * cancel-and-replace semantics let a falling edge cleanly preempt an in-flight
  * blink tick. */
 static void strobe_handler(struct k_work *work) {
+    ARG_UNUSED(work);
     static bool strobe_on = false;
     bool fault_active = gpio_pin_get(gpio0, PIN_STROBE_IN) == 1;
 
@@ -397,26 +353,19 @@ static void strobe_handler(struct k_work *work) {
 /* GPIO ISR for gpio0 — defer the read by 30 ms to debounce. */
 void port0_changed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
+    ARG_UNUSED(dev);
+    ARG_UNUSED(cb);
+
     if (pins & BIT(PIN_STROBE_IN)) {
         k_work_reschedule(&strobe_work, K_MSEC(30));
     }
 }
 
 /* GPIO setup at boot: STROBE_IN as edge-IRQ input, every other lighting pin as
- * inactive output. Logs (but does not fatally fail) if a gpio device isn't
- * ready — the device-readiness check uses `!device_is_ready` so a non-ready
- * device produces err == 1, matching the existing log-only handling. */
-static void configure_car_outputs(void) {
-    int err;
-
-    err = !device_is_ready(gpio0);
-    if (err) {
-        LOG_ERR("GPIO port 0 not ready!");
-    }
-
-    err = !device_is_ready(gpio1);
-    if (err) {
-        LOG_ERR("GPIO port 1 not ready!");
+ * inactive output. Returns -ENODEV if either GPIO controller isn't ready. */
+static int configure_car_outputs(void) {
+    if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) {
+        return -ENODEV;
     }
 
     gpio_pin_configure(gpio0, PIN_STROBE_IN, GPIO_INPUT | GPIO_PULL_DOWN);
@@ -440,22 +389,19 @@ static void configure_car_outputs(void) {
         k_work_reschedule(&strobe_work, K_NO_WAIT);
     }
 
-    LOG_INF("GPIO configured");
+    return 0;
 }
 
 /* Boot order: BLE → settings (loads bonds) → blink work → NUS client → scanner
  * → GPIO. The main loop is idle; everything happens in callbacks/work items. */
 int main(void)
 {
-    LOG_INF("Starting Bluetooth Central");
     int err;
 
     err = bt_enable(NULL);
     if (err) {
-        LOG_ERR("Bluetooth init failed (err %d)", err);
-        return 0;
+        return err;
     }
-    LOG_INF("Bluetooth initialized");
 
     if (IS_ENABLED(CONFIG_SETTINGS)) {
         settings_load();
@@ -465,17 +411,19 @@ int main(void)
 
     err = nus_client_init();
     if (err != 0) {
-        LOG_ERR("nus_client_init failed (err %d)", err);
-        return 0;
+        return err;
     }
 
     scan_init();
     err = scan_start();
     if (err) {
-        return 0;
+        return err;
     }
 
-    configure_car_outputs();
+    err = configure_car_outputs();
+    if (err) {
+        return err;
+    }
 
     for (;;) {
         k_sleep(K_FOREVER);

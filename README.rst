@@ -46,7 +46,7 @@ Wire protocol (received)
 
 One ASCII byte per BLE NUS write from the steering wheel.
 **Uppercase = ON / pressed, lowercase = OFF / released.** Unknown bytes
-log a warning. ``\r``/``\n`` are ignored.
+are ignored. ``\r``/``\n`` are ignored.
 
 ==========  ============================
 Char        Meaning
@@ -78,14 +78,12 @@ Sysbuild is required (the IPC-radio image lives in ``sysbuild/ipc_radio``).
 When multiple J-Links are connected, pick the target in the VS Code
 extension's flash dialog or pass ``--dev-id <segger-serial>`` on the CLI.
 
-Logs
-----
+Logging
+-------
 
-UART/console is intentionally torn out in ``app.overlay``; logging goes
-over **SEGGER RTT** only (``CONFIG_LOG_BACKEND_RTT=y``,
-``CONFIG_LOG_BACKEND_UART=n``). The custom PCB doesn't expose a serial
-path. Read with the VS Code "RTT" terminal, ``JLinkRTTViewer``, or
-``nrfutil device rtt``.
+Runtime logging is disabled in the current configuration. UART/console is
+still removed in ``app.overlay`` and there is no serial log path on the
+custom PCB.
 
 BLE / pairing
 -------------
