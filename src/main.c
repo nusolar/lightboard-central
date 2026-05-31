@@ -50,8 +50,8 @@ static struct gpio_callback gpio0_cb;
 #define BLINK_PERIOD_MS 500
 static struct k_work_delayable strobe_work;
 
-/* Single-state turn-signal machine. Hazard is its own state, not LEFT | RIGHT,
- * so a hazard command cleanly overrides whatever direction was previously set. */
+/* Blink output state. Hazards are modeled explicitly because they override the
+ * remembered directional request rather than being treated as LEFT | RIGHT. */
 enum blink_state_t {
     BLINK_NONE,
     BLINK_LEFT,
@@ -66,6 +66,19 @@ static struct k_work_delayable blink_work;
 
 static bool headlight_on = false;
 static bool horn_on = false;
+static volatile enum blink_state_t requested_turn = BLINK_NONE;
+static volatile bool hazard_on = false;
+
+/* Hazards override directional requests, but the requested turn direction is
+ * kept latched so it can resume automatically once hazards are released. */
+static void refresh_blink_state(void)
+{
+    if (hazard_on) {
+        current_blink = BLINK_HAZARD;
+    } else {
+        current_blink = requested_turn;
+    }
+}
 
 /* Single point of truth for every output pin driven by steering-wheel commands.
  * Strobe is independent (own input source, own cadence, own writer in
@@ -128,17 +141,19 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
     char cmd = data[0];
 
     /* 1-byte ASCII protocol from the steering wheel. Uppercase = ON / pressed,
-     * lowercase = OFF / released. Lowercase only clears its own direction so a
-     * stale 'l' release doesn't cancel a newer right turn (and vice versa). */
+     * lowercase = OFF / released. Left/right update the remembered directional
+     * request; lowercase only clears the matching direction so a stale release
+     * can't cancel a newer opposite turn. Hazards live on a separate latch
+     * that overrides the directional request while active. */
     switch (cmd) {
-        case 'L': current_blink = BLINK_LEFT; break;
-        case 'l': if (current_blink == BLINK_LEFT) current_blink = BLINK_NONE; break;
+        case 'L': requested_turn = BLINK_LEFT; break;
+        case 'l': if (requested_turn == BLINK_LEFT) requested_turn = BLINK_NONE; break;
 
-        case 'R': current_blink = BLINK_RIGHT; break;
-        case 'r': if (current_blink == BLINK_RIGHT) current_blink = BLINK_NONE; break;
+        case 'R': requested_turn = BLINK_RIGHT; break;
+        case 'r': if (requested_turn == BLINK_RIGHT) requested_turn = BLINK_NONE; break;
 
-        case 'Z': current_blink = BLINK_HAZARD; break;
-        case 'z': if (current_blink == BLINK_HAZARD) current_blink = BLINK_NONE; break;
+        case 'Z': hazard_on = true; break;
+        case 'z': hazard_on = false; break;
 
         case 'F': headlight_on = true; break;
         case 'f': headlight_on = false; break;
@@ -148,6 +163,8 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
 
         default: break;
     }
+
+    refresh_blink_state();
 
     if (current_blink != BLINK_NONE) {
         k_work_reschedule(&blink_work, K_NO_WAIT);
