@@ -3,12 +3,12 @@ Lightboard — Central (Lightboard Unit)
 
 Firmware for the lightboard half of Northwestern's solar-car **Lightboard**
 system. This board sits near the car battery and drives all high-power
-outputs: headlights, brake/turn lights, hazards, horn, and the
-battery-fault strobe. It has two distinct input sources:
+outputs: headlights, turn lights, hazards, horn, and the battery-fault
+strobe. It has two distinct input sources:
 
-1. **BLE commands from the steering wheel** (``../peripheral/``), parsed
-   in ``ble_data_received``.
-2. **Direct GPIO inputs from elsewhere on the car** — currently the
+1. **BLE NUS notifications from the steering wheel** (``../peripheral/``),
+   parsed in ``ble_data_received``.
+2. **Direct GPIO inputs from elsewhere on the car** -- currently the
    strobe trigger, with likely additions as the car grows.
 
 This is the integration point of the lights system: assume new
@@ -44,9 +44,9 @@ firmware is the source of truth.
 Wire protocol (received)
 ------------------------
 
-One ASCII byte per BLE NUS write from the steering wheel.
+One ASCII byte per BLE NUS notification from the steering wheel.
 **Uppercase = ON / pressed, lowercase = OFF / released.** Unknown bytes
-are ignored. ``\r``/``\n`` are ignored.
+are ignored.
 
 ==========  ============================
 Char        Meaning
@@ -58,9 +58,35 @@ Char        Meaning
 ``H`` / ``h``   Horn
 ==========  ============================
 
-The protocol is steering-wheel inputs only. Brake-pedal and
-strobe-trigger inputs are wired directly into this board's GPIO and
-never travel over BLE.
+The protocol is steering-wheel inputs only. Strobe-trigger input is wired
+directly into this board's GPIO and never travels over BLE.
+
+Runtime behavior
+----------------
+
+- ``ble_data_received`` updates the latched horn/headlight/turn/hazard
+  state from each one-byte NUS command.
+- ``blink_handler`` runs from a delayable work item and toggles turn or
+  hazard outputs every 500 ms while a blink mode is active.
+- ``strobe_handler`` is independent of BLE. It debounces ``STROBE_IN`` and
+  toggles ``STROBE_OUT`` every 250 ms while the fault line is asserted.
+- Hazard mode overrides the requested left/right turn direction, but the
+  requested turn is remembered and resumes after hazards are released.
+
+Configuration notes
+-------------------
+
+``prj.conf`` keeps the image focused on the custom lightboard hardware:
+
+- UART, console, printk, RTT, and logging are disabled because the custom
+  PCB has no runtime log transport.
+- The firmware is a BLE Central/GATT Client with the NUS client, scan
+  helper, UUID filter support, and GATT discovery manager enabled.
+- Bonding is stored through the Settings subsystem so the board can
+  reconnect after power cycles.
+- nRF54L15 GPIOTE instances are enabled for the ``STROBE_IN`` edge
+  interrupt, and the internal 32 kHz RC source is selected because the
+  custom PCB has no external low-frequency crystal.
 
 Build & flash
 -------------
@@ -88,8 +114,8 @@ custom PCB.
 BLE / pairing
 -------------
 
-- BLE Central. Scans for the steering wheel's NUS service UUID plus any
-  bonded-address filters, and reconnects automatically on disconnect.
+- BLE Central. Scans for the steering wheel's NUS service UUID and
+  reconnects automatically on disconnect.
 - Pairing is **Just Works** — neither side has a passkey display or
   input. First connection bonds automatically; bond persists in flash
   via the Settings subsystem and is reloaded on boot.

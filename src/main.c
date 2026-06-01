@@ -69,8 +69,17 @@ static bool horn_on = false;
 static volatile enum blink_state_t requested_turn = BLINK_NONE;
 static volatile bool hazard_on = false;
 
-/* Hazards override directional requests, but the requested turn direction is
- * kept latched so it can resume automatically once hazards are released. */
+/**
+ * @brief Recompute the active blink mode from the latched command state.
+ *
+ * Hazards have priority over directional turn requests. The directional
+ * request remains latched while hazards are active so that the selected turn
+ * signal can resume automatically when hazards are released.
+ *
+ * @param None.
+ *
+ * @return None.
+ */
 static void refresh_blink_state(void)
 {
     if (hazard_on) {
@@ -80,12 +89,24 @@ static void refresh_blink_state(void)
     }
 }
 
-/* Single point of truth for every output pin driven by steering-wheel commands.
- * Strobe is independent (own input source, own cadence, own writer in
- * strobe_handler) and is intentionally not touched here. Called on each blink-
- * handler tick (with the current toggle phase) and whenever a BLE command shifts
- * state. Turn signals only assert when current_blink != NONE *and* the toggle is
- * high, so the same routine handles steady state and the blink phase in one shot. */
+/**
+ * @brief Write the current steering-wheel command state to the vehicle outputs.
+ *
+ * This routine is the single point of truth for the turn signal, horn, and
+ * headlight output pins. The strobe output is intentionally excluded because it
+ * is driven by the battery-monitor fault input and by @ref strobe_handler.
+ *
+ * Turn outputs assert only when an active blink mode is selected and the caller
+ * supplies a high blink phase. Horn and headlight outputs are steady-state
+ * latches and are written on every call so command changes take effect
+ * immediately.
+ *
+ * @param blink_toggle_state Current blink phase. Pass true to allow the active
+ *                           turn signal or hazard outputs to turn on; pass
+ *                           false to force them off for this phase.
+ *
+ * @return None.
+ */
 static void update_car_outputs(bool blink_toggle_state) {
     bool horn_state = horn_on;
     bool headlight_state = headlight_on;
@@ -109,8 +130,19 @@ static void update_car_outputs(bool blink_toggle_state) {
     gpio_pin_set(gpio0, PIN_HEADLIGHT, headlight_state ? 1 : 0);
 }
 
-/* 500 ms-toggle work item. Re-arms itself while a turn signal is active;
- * the final tick clears outputs and the work doesn't re-arm. */
+/**
+ * @brief Delayable work handler that generates the turn-signal blink cadence.
+ *
+ * The handler toggles an internal phase bit every @ref BLINK_PERIOD_MS and
+ * writes the outputs through @ref update_car_outputs. It reschedules itself
+ * while any turn signal mode is active. When blinking is no longer active, it
+ * performs one final output update with the blink phase forced low.
+ *
+ * @param work Pointer to the Zephyr work item that invoked the handler. The
+ *             pointer is unused because all required state is held globally.
+ *
+ * @return None.
+ */
 static void blink_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
@@ -126,10 +158,23 @@ static void blink_handler(struct k_work *work)
     }
 }
 
-/* NUS notify callback — fires once per byte the peripheral sends. Decodes the
- * command, updates state flags, then re-arms or cancels blink_work depending
- * on whether any turn signal is now active. Returns BT_GATT_ITER_CONTINUE to
- * keep the subscription alive. */
+/**
+ * @brief Handle a received Nordic UART Service notification from the peripheral.
+ *
+ * The steering-wheel peripheral sends a one-byte ASCII command. Uppercase
+ * values represent pressed/on states and lowercase values represent
+ * released/off states. This callback decodes the first byte, updates the local
+ * output latches, refreshes the derived blink state, and starts or stops the
+ * blink work item as needed.
+ *
+ * @param nus  NUS client instance that received the notification. The value is
+ *             unused because this module has only one client instance.
+ * @param data Pointer to the received notification payload.
+ * @param len  Number of bytes available at @p data.
+ *
+ * @return BT_GATT_ITER_CONTINUE so the notification subscription remains
+ *         active.
+ */
 static uint8_t ble_data_received(struct bt_nus_client *nus,
                         const uint8_t *data, uint16_t len)
 {
@@ -176,9 +221,19 @@ static uint8_t ble_data_received(struct bt_nus_client *nus,
     return BT_GATT_ITER_CONTINUE;
 }
 
-/* GATT discovery succeeded. Bind the NUS client to the discovered handles and
- * subscribe for receive notifications — from here, ble_data_received fires on
- * every byte the peripheral sends. */
+/**
+ * @brief Complete Nordic UART Service discovery on a connected peer.
+ *
+ * Assigns the discovered handles to the global NUS client, subscribes to the
+ * receive characteristic, and releases the discovery manager data buffer. After
+ * this succeeds, @ref ble_data_received is called for each NUS notification.
+ *
+ * @param dm      Discovery manager object containing the discovered handles.
+ * @param context Callback context supplied to bt_gatt_dm_start(); expected to
+ *                point to the NUS client instance.
+ *
+ * @return None.
+ */
 static void discovery_complete(struct bt_gatt_dm *dm, void *context)
 {
     struct bt_nus_client *nus = context;
@@ -189,8 +244,19 @@ static void discovery_complete(struct bt_gatt_dm *dm, void *context)
     bt_gatt_dm_data_release(dm);
 }
 
-/* GATT discovery failed. The peer will likely time out and disconnect, after
- * which scan_work re-arms scanning. */
+/**
+ * @brief Handle a GATT discovery error.
+ *
+ * The implementation intentionally performs no recovery in this callback. If
+ * discovery fails, the connection is expected to time out or disconnect, and the
+ * disconnect path will re-arm scanning.
+ *
+ * @param conn    Connection on which discovery failed.
+ * @param err     Zephyr error code reported by the discovery manager.
+ * @param context User context supplied to bt_gatt_dm_start().
+ *
+ * @return None.
+ */
 static void discovery_error(struct bt_conn *conn, int err, void *context)
 {
     ARG_UNUSED(conn);
@@ -203,8 +269,16 @@ struct bt_gatt_dm_cb discovery_cb = {
     .error_found = discovery_error,
 };
 
-/* Kick off NUS GATT discovery. Called from security_changed (success path)
- * and from connected() if security setup failed. */
+/**
+ * @brief Start GATT discovery for the Nordic UART Service on the active peer.
+ *
+ * Discovery is only started if @p conn matches @ref default_conn. This protects
+ * against stale callbacks from an older connection attempt after a reconnect.
+ *
+ * @param conn Bluetooth connection to inspect for the NUS service.
+ *
+ * @return None.
+ */
 static void gatt_discover(struct bt_conn *conn)
 {
     /* Defends against stale callbacks from a previous connection attempt. */
@@ -215,9 +289,19 @@ static void gatt_discover(struct bt_conn *conn)
     (void)bt_gatt_dm_start(conn, BT_UUID_NUS_SERVICE, &discovery_cb, &nus_client);
 }
 
-/* Connection callback. On failure, drop default_conn and re-arm scanning. On
- * success, raise the link to encrypted+bonded — security_changed will then
- * trigger GATT discovery — and stop active scanning while we have a peer. */
+/**
+ * @brief Handle completion of a Bluetooth connection attempt.
+ *
+ * On connection failure, scanning is scheduled again through @ref scan_work.
+ * On success, the connection is retained as @ref default_conn, link security is
+ * requested, and scanning is stopped. If the security request fails immediately,
+ * GATT discovery is started without waiting for the security callback.
+ *
+ * @param conn     Connection object supplied by the Bluetooth stack.
+ * @param conn_err Zero on success, otherwise the Bluetooth connection error.
+ *
+ * @return None.
+ */
 static void connected(struct bt_conn *conn, uint8_t conn_err)
 {
     int err;
@@ -239,8 +323,19 @@ static void connected(struct bt_conn *conn, uint8_t conn_err)
     (void)bt_scan_stop();
 }
 
-/* Drop the conn ref, clear default_conn, and re-arm scanning. The bond persists
- * across resets, so the rescan auto-reconnects the same peer once it advertises. */
+/**
+ * @brief Handle disconnection from the steering-wheel peripheral.
+ *
+ * If the disconnected peer is the active default connection, this function
+ * releases the retained connection reference, clears @ref default_conn, and
+ * schedules scanning so the central can reconnect when the peripheral
+ * advertises again. Stored bonding data is left intact.
+ *
+ * @param conn   Connection object that disconnected.
+ * @param reason Bluetooth HCI disconnect reason. Unused by this handler.
+ *
+ * @return None.
+ */
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     ARG_UNUSED(reason);
@@ -255,9 +350,19 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     (void)k_work_submit(&scan_work);
 }
 
-/* SMP outcome (Just Works pairing for us). On success this is what triggers
- * GATT discovery; on failure we still call gatt_discover so the link can keep
- * progressing without security. */
+/**
+ * @brief Handle the result of a Bluetooth security level change.
+ *
+ * This project uses the callback as the gate to begin GATT discovery after the
+ * stack has completed or rejected the security request. Discovery is attempted
+ * regardless of @p err so the link can still operate when security setup fails.
+ *
+ * @param conn  Connection whose security state changed.
+ * @param level Current security level reported by the stack.
+ * @param err   Security error value; zero means the level change succeeded.
+ *
+ * @return None.
+ */
 static void security_changed(struct bt_conn *conn, bt_security_t level,
                  enum bt_security_err err)
 {
@@ -273,8 +378,17 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .security_changed = security_changed
 };
 
-/* Initialize the NUS client. Only the receive callback is wired up; the
- * central never sends to the peripheral, so .sent is omitted. */
+/**
+ * @brief Initialize the Nordic UART Service client instance.
+ *
+ * Registers the NUS client callbacks used by the central. Only the receive
+ * callback is configured because this central consumes steering-wheel commands
+ * and does not send application payloads back to the peripheral.
+ *
+ * @param None.
+ *
+ * @return 0 on success, or a negative Zephyr error code from bt_nus_client_init().
+ */
 static int nus_client_init(void)
 {
     int err;
@@ -292,9 +406,18 @@ static int nus_client_init(void)
     return 0;
 }
 
-/* (Re)arm scanning with a NUS UUID filter so the peripheral's scan-response
- * (which carries the NUS UUID) gets matched. Called at boot and from
- * scan_work_handler after a disconnect. */
+/**
+ * @brief Start active scanning for peripherals advertising the NUS UUID.
+ *
+ * Any existing scan is stopped, scan filters are reset, the Nordic UART Service
+ * UUID filter is installed, and active scanning is started. Active scanning is
+ * required because the peripheral exposes the NUS UUID in its scan-response
+ * data.
+ *
+ * @param None.
+ *
+ * @return 0 on success, or a negative Zephyr error code from the scan API.
+ */
 static int scan_start(void)
 {
     int err;
@@ -324,8 +447,17 @@ static int scan_start(void)
     return 0;
 }
 
-/* Workqueue trampoline so disconnected() and connection-failure paths can
- * re-arm the scanner outside the BT thread. */
+/**
+ * @brief Workqueue trampoline used to restart scanning outside Bluetooth callbacks.
+ *
+ * Bluetooth connection callbacks submit this work item when scanning needs to
+ * be restarted. Running @ref scan_start from the system workqueue keeps scan
+ * setup out of timing-sensitive Bluetooth callback context.
+ *
+ * @param item Pointer to the submitted work item. Unused by this handler.
+ *
+ * @return None.
+ */
 static void scan_work_handler(struct k_work *item)
 {
     ARG_UNUSED(item);
@@ -333,8 +465,17 @@ static void scan_work_handler(struct k_work *item)
     (void)scan_start();
 }
 
-/* One-time scan-module setup. connect_if_match = true makes the stack auto-
- * initiate a connection as soon as any scan filter matches. */
+/**
+ * @brief Initialize the Bluetooth scan helper module.
+ *
+ * Configures scanning so the Bluetooth stack automatically initiates a
+ * connection when a configured scan filter matches. Also initializes the work
+ * item used to restart scanning after disconnects or failed connection attempts.
+ *
+ * @param None.
+ *
+ * @return None.
+ */
 static void scan_init(void)
 {
     struct bt_scan_init_param scan_init = {
@@ -346,12 +487,20 @@ static void scan_init(void)
     k_work_init(&scan_work, scan_work_handler);
 }
 
-/* While STROBE_IN is asserted (steady fault from the battery monitor), self-rearm
- * to toggle STROBE_OUT at STROBE_PERIOD_MS. When STROBE_IN goes low, drop the
- * output and stop rescheduling. This handler also serves as the post-IRQ debounce:
- * port0_changed schedules us 30 ms after the edge, and k_work_reschedule's
- * cancel-and-replace semantics let a falling edge cleanly preempt an in-flight
- * blink tick. */
+/**
+ * @brief Drive the strobe output while the battery-monitor fault input is active.
+ *
+ * The handler reads @ref PIN_STROBE_IN after the debounce delay scheduled by
+ * @ref port0_changed. When the input is high, it toggles @ref PIN_STROBE_OUT
+ * and reschedules itself at @ref STROBE_PERIOD_MS. When the input is low, it
+ * clears the output and stops rescheduling.
+ *
+ * @param work Pointer to the delayable work item that invoked the handler. The
+ *             pointer is unused because strobe state is held locally and in
+ *             GPIO.
+ *
+ * @return None.
+ */
 static void strobe_handler(struct k_work *work) {
     ARG_UNUSED(work);
     static bool strobe_on = false;
@@ -367,7 +516,19 @@ static void strobe_handler(struct k_work *work) {
     }
 }
 
-/* GPIO ISR for gpio0 — defer the read by 30 ms to debounce. */
+/**
+ * @brief GPIO port 0 interrupt callback for the strobe fault input.
+ *
+ * The ISR-level callback does not read the input directly. Instead, it schedules
+ * @ref strobe_handler 30 ms later so mechanical or electrical edge noise can
+ * settle before the strobe state is evaluated.
+ *
+ * @param dev  GPIO device that raised the callback.
+ * @param cb   Callback structure registered for the port.
+ * @param pins Bit mask of pins that triggered the callback.
+ *
+ * @return None.
+ */
 void port0_changed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     ARG_UNUSED(dev);
@@ -378,8 +539,18 @@ void port0_changed(const struct device *dev, struct gpio_callback *cb, uint32_t 
     }
 }
 
-/* GPIO setup at boot: STROBE_IN as edge-IRQ input, every other lighting pin as
- * inactive output. Returns -ENODEV if either GPIO controller isn't ready. */
+/**
+ * @brief Configure all vehicle-side GPIO inputs, outputs, callbacks, and work.
+ *
+ * Sets the battery-monitor strobe input as a pulled-down edge interrupt and
+ * configures the lighting, horn, and strobe outputs as inactive outputs. The
+ * function also registers the GPIO callback, initializes the strobe work item,
+ * and manually starts strobing if the fault input is already asserted at boot.
+ *
+ * @param None.
+ *
+ * @return 0 on success, or -ENODEV if either GPIO controller is unavailable.
+ */
 static int configure_car_outputs(void) {
     if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) {
         return -ENODEV;
@@ -409,8 +580,21 @@ static int configure_car_outputs(void) {
     return 0;
 }
 
-/* Boot order: BLE → settings (loads bonds) → blink work → NUS client → scanner
- * → GPIO. The main loop is idle; everything happens in callbacks/work items. */
+/**
+ * @brief Application entry point for the lightboard central.
+ *
+ * Initializes Bluetooth, loads persisted settings and bonds when enabled,
+ * initializes the blink work item, configures the NUS client, starts filtered
+ * scanning for the steering-wheel peripheral, and configures the vehicle-side
+ * GPIO outputs. After initialization, the thread sleeps forever because all
+ * runtime behavior is handled by Bluetooth callbacks, GPIO callbacks, and
+ * workqueue handlers.
+ *
+ * @param None.
+ *
+ * @return 0 is not expected during normal operation. Returns a negative Zephyr
+ *         error code if initialization fails before the main sleep loop starts.
+ */
 int main(void)
 {
     int err;
